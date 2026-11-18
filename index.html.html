@@ -1,6 +1,6 @@
 <!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
 <title>Mapa de Coordenadas</title>
-<meta name="claude:viewport-fit-sides" content="cover">
+
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Pixelify+Sans:wght@500;600&display=swap">
 <style>
 /* Layout: mapa em grade de chunks à esquerda, painel de cadastro e lista à direita; empilha no celular. Dois mapas: compartilhado (todos) e pessoal (só você). */
@@ -141,6 +141,15 @@ textarea{min-height:90px;font:12px ui-monospace,Menlo,Consolas,monospace;resize:
       <div class="tabs" role="tablist" aria-label="Dimensão" id="tabs"></div>
     </div>
   </header>
+  <section class="card" style="margin-bottom:12px" aria-label="Mundos compartilhados">
+    <h2>Mundos compartilhados</h2>
+    <div class="btns" style="margin-top:0"><button type="button" class="btn primary" id="worldCreate">Criar mundo</button><button type="button" class="btn" id="worldJoin">Entrar em mundo</button><button type="button" class="btn" id="worldLeave" hidden>Sair do mundo</button></div>
+    <div id="worldCreateFields" class="field" hidden><label for="worldName">Nome do mundo</label><input id="worldName" type="text" maxlength="60" placeholder="Ex.: Nosso survival"><div class="btns"><button type="button" class="btn primary" id="worldCreateConfirm">Criar e gerar código</button></div></div>
+    <div id="worldJoinFields" class="field" hidden><label for="worldCodeInput">Código do convite</label><input id="worldCodeInput" type="text" maxlength="40" placeholder="Cole o código do mundo"><div class="btns"><button type="button" class="btn primary" id="worldJoinConfirm">Entrar</button></div></div>
+    <p class="sub" id="worldInfo" style="margin-top:10px">Nenhum mundo selecionado.</p>
+    <div id="worldInvite" class="btns" hidden><button type="button" class="btn small" id="worldCopyCode">Copiar código</button><button type="button" class="btn small" id="worldCopyLink">Copiar link de convite</button></div>
+    <p class="err" id="worldError" role="alert"></p>
+  </section>
   <p class="status" id="status" role="status"></p>
 
   <div class="layout">
@@ -207,6 +216,22 @@ textarea{min-height:90px;font:12px ui-monospace,Menlo,Consolas,monospace;resize:
 </div>
 <div id="toast" role="status" aria-live="polite"></div>
 
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+<script>
+// Cole aqui as informações do seu aplicativo Web em Firebase > Configurações do projeto.
+// Estes identificadores não são senhas; a proteção é feita pelas regras do Firestore.
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyARFXhREv6rwpcKNGTCt_vzG49F0r2daCE",
+  authDomain: "coor-ab5e4.firebaseapp.com",
+  projectId: "coor-ab5e4",
+  storageBucket: "coor-ab5e4.firebasestorage.app",
+  messagingSenderId: "846301748770",
+  appId: "1:846301748770:web:c3b38f2a9e4dd4852bf47b",
+  measurementId: "G-3VKFVSJPBQ"
+};
+</script>
 <script>
 (function(){
 'use strict';
@@ -246,7 +271,7 @@ function clone(o){ return JSON.parse(JSON.stringify(o)); }
 /* ---------- estado ---------- */
 var scope='shared', dim='ow', selected=null, editing=null, curIcon='preset:casa', customIcon=null, pick=null;
 var view={x:0,z:0,s:0.6}, centered=false;
-var dbh=null, userNs=null, myId=null, canWrite=true, isAdmin=false;
+var dbh=null, myId=null, canWrite=true, isAdmin=false, worldId=null, worldName='', unsubscribeWorld=null;
 var sharedDocs={}, mineItems={}, sharedReady=false, sharedErr=false, mineReady=false, slowNet=false;
 var cache={shared:[],mine:[]}, names={};
 var shareOK=false; /* mapa compartilhado disponível (banco + identidade) */
@@ -276,26 +301,25 @@ function saveLocal(){
 /* ---------- escrita ---------- */
 var wq=Promise.resolve();
 function errMsg(e){
-  var c=e&&e.code;
-  if(c==='invalid_argument') return 'Sem permissão para salvar aqui. Peça acesso de Colaborador a quem compartilhou a página.';
-  if(c==='quota_exceeded') return 'O limite de armazenamento foi atingido.';
-  if(c==='resource_exhausted') return 'Muitas operações seguidas. Tente de novo em instantes.';
-  return 'Tente de novo em instantes.';
+  if(e&&e.code==='permission-denied') return 'Permissão negada pelo banco. Confira as regras do Firestore.';
+  if(e&&e.code==='resource-exhausted') return 'Limite de operações atingido. Tente novamente.';
+  return (e&&e.message)||'Tente novamente em instantes.';
 }
 function persist(sc,owner,mutator,okMsg){
   wq=wq.then(function(){
-    if(dbh&&myId){
-      var ref=sc==='shared'?dbh.doc('places/'+owner):dbh.collection('data/users/'+myId).doc('places');
-      return ref.get().then(function(ds){
-        var base=(ds.exists&&ds.data()&&ds.data().items)||{}, map=clone(base);
-        mutator(map);
-        return ref.set({items:map});
-      }).then(function(){ if(okMsg) toast(okMsg); });
+    if(sc==='shared'){
+      if(!dbh||!myId||!worldId) throw new Error('Entre em um mundo compartilhado primeiro.');
+      var ref=dbh.collection('worlds').doc(worldId).collection('places').doc(owner);
+      return dbh.runTransaction(function(tx){
+        return tx.get(ref).then(function(ds){
+          var map=clone((ds.exists&&ds.data().items)||{});
+          mutator(map);
+          tx.set(ref,{items:map});
+        });
+      }).then(function(){if(okMsg) toast(okMsg);});
     }
-    if(sc==='mine'){
-      var map=clone(mineItems); mutator(map); mineItems=map; saveLocal(); rebuild(); renderAll(); if(okMsg) toast(okMsg);
-    }
-  }).catch(function(e){ toast('Não foi possível salvar. '+errMsg(e)); });
+    var map=clone(mineItems);mutator(map);mineItems=map;saveLocal();rebuild();renderAll();if(okMsg)toast(okMsg);
+  }).catch(function(e){toast('Não foi possível salvar. '+errMsg(e));});
   return wq;
 }
 
@@ -347,21 +371,14 @@ function renderTabs(){
   });
 }
 function renderStatus(){
-  var el=$('status'), warn=false, t='';
+  var el=$('status'),warn=false,t='';
   if(scope==='shared'){
-    if(!shareOK){ t='O mapa compartilhado precisa que você esteja logado e que a página tenha sido compartilhada com você. Enquanto isso, use "Meu mapa".'; warn=true; }
-    else if(sharedErr){ t='Não foi possível carregar o mapa compartilhado agora.'; warn=true; }
-    else if(!sharedReady){ t=slowNet?'Ainda sem resposta do mapa compartilhado. Os locais podem estar desatualizados.':'Conectando ao mapa compartilhado…'; warn=slowNet; }
-    else{
-      var people={}; cache.shared.forEach(function(i){people[i.owner]=1});
-      var n=cache.shared.length, p=Object.keys(people).length;
-      t=n?(n+(n===1?' local':' locais')+' de '+p+(p===1?' pessoa':' pessoas')+'. Todos com acesso veem este mapa.'):'Nenhum local compartilhado ainda. Adicione o primeiro pelo formulário.';
-    }
-  }else{
-    t=(dbh&&myId)?'Só você vê este mapa. Ele acompanha sua conta em qualquer aparelho.':'Só você vê este mapa. Neste modo ele fica salvo apenas neste navegador.';
-  }
-  if(canWrite===false){ t+=' Você pode ver, mas não salvar: peça acesso de Colaborador a quem compartilhou.'; warn=true; }
-  el.textContent=t; el.className='status'+(warn?' warn':'');
+    if(!worldId){t='Crie um mundo ou entre com um código para compartilhar coordenadas.';warn=true;}
+    else if(sharedErr){t='Não foi possível carregar as coordenadas do mundo.';warn=true;}
+    else if(!sharedReady){t='Conectando ao mundo compartilhado…';}
+    else{t=cache.shared.length+' local(is) neste mundo. As alterações aparecem para todos os participantes.';}
+  }else{t='Só você vê este mapa. Ele fica salvo neste navegador.';}
+  el.textContent=t;el.className='status'+(warn?' warn':'');
 }
 function setScope(k){
   scope=k; selected=null; pick=null;
@@ -462,9 +479,9 @@ function otherDim(it){
 function canEditItem(it){
   if(canWrite===false) return false;
   if(it.scope==='mine') return true;
-  return it.owner===myId||isAdmin;
+  return it.owner===myId;
 }
-function authorOf(it){ return it.owner===myId?'você':(names[it.owner]||'alguém'); }
+function authorOf(it){ return it.owner===myId?'você':'outro participante'; }
 function renderList(){
   $('listTitle').textContent=SCOPES[scope]+' · '+DIMS[dim];
   var ul=$('list'); ul.innerHTML='';
@@ -651,58 +668,75 @@ if(window.ResizeObserver) new ResizeObserver(draw).observe(box); else window.add
 try{ window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',draw); }catch(e){}
 new MutationObserver(draw).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
 
-/* ---------- nomes de quem adicionou ---------- */
-function resolveNames(){
-  if(!userNs) return;
-  var ids={}; cache.shared.forEach(function(i){ if(i.owner!==myId) ids[i.owner]=1; });
-  var list=Object.keys(ids); if(!list.length) return;
-  userNs.profiles(list).then(function(ps){
-    var changed=false;
-    list.forEach(function(id){ var n=(ps[id]&&ps[id].name)||''; if(names[id]!==n){ names[id]=n; changed=true; } });
-    if(changed) renderList();
-  });
+/* ---------- mundos compartilhados: Firebase, sem conta Claude ---------- */
+function worldError(msg){$('worldError').textContent=msg||'';}
+function worldCode(){
+  var bytes=new Uint8Array(15);crypto.getRandomValues(bytes);
+  return Array.from(bytes,function(b){return b.toString(16).padStart(2,'0');}).join('').toUpperCase();
 }
-
-/* ---------- conexão com o banco ---------- */
-function migrateLocal(){
-  var old=loadLocal(); if(!old.length) return;
-  var flag=false; try{ flag=localStorage.getItem(LS+'-migrado')==='1'; }catch(e){}
-  if(flag) return;
-  persist('mine',myId,function(map){
-    old.forEach(function(o){ if(validItem(o)) map[o.id||uid()]={name:o.name,x:Math.round(o.x),y:isFinite(o.y)?Math.round(o.y):64,z:Math.round(o.z),dim:DIMS[o.dim]?o.dim:'ow',icon:o.icon||'preset:ponto',note:o.note||'',t:Date.now()}; });
-  },'Os locais salvos antes neste navegador foram movidos para Meu mapa.').then(function(){ try{ localStorage.setItem(LS+'-migrado','1'); }catch(e){} });
+function worldLink(){return location.origin+location.pathname+'?mundo='+encodeURIComponent(worldId);}
+function worldPanel(){
+  $('worldInfo').textContent=worldId?'Mundo: '+worldName+' · Código: '+worldId:'Nenhum mundo selecionado.';
+  $('worldInvite').hidden=!worldId;$('worldLeave').hidden=!worldId;
 }
+function disconnectWorld(){
+  if(unsubscribeWorld){unsubscribeWorld();unsubscribeWorld=null;}
+  worldId=null;worldName='';shareOK=false;sharedDocs={};sharedReady=false;sharedErr=false;
+  if(scope==='shared')scope='mine';$('fscope').value='mine';
+  try{localStorage.removeItem('mc-world-id');}catch(e){}
+  rebuild();renderAll();worldPanel();
+}
+function enterWorld(code){
+  code=(code||'').trim().toUpperCase();worldError('');
+  if(!/^[A-F0-9]{30}$/.test(code)){worldError('Código inválido. Cole o código completo do convite.');return Promise.resolve();}
+  if(!dbh||!myId){worldError('Banco ainda não conectado. Verifique a configuração do Firebase.');return Promise.resolve();}
+  return dbh.collection('worlds').doc(code).get().then(function(ds){
+    if(!ds.exists)throw new Error('Mundo não encontrado. Confira o código.');
+    if(unsubscribeWorld)unsubscribeWorld();
+    worldId=code;worldName=ds.data().name||'Mundo';shareOK=true;sharedReady=false;sharedErr=false;sharedDocs={};
+    try{localStorage.setItem('mc-world-id',code);}catch(e){}
+    $('worldCreateFields').hidden=true;$('worldJoinFields').hidden=true;
+    scope='shared';$('fscope').value='shared';rebuild();renderAll();worldPanel();
+    unsubscribeWorld=dbh.collection('worlds').doc(code).collection('places').onSnapshot(function(snap){
+      var d={};snap.docs.forEach(function(doc){d[doc.id]=(doc.data().items)||{};});
+      sharedDocs=d;sharedReady=true;sharedErr=false;rebuild();renderAll();autoCenter(true);
+    },function(e){sharedErr=true;renderAll();worldError(errMsg(e));});
+  }).catch(function(e){worldError(errMsg(e));});
+}
+$('worldCreate').addEventListener('click',function(){worldError('');$('worldCreateFields').hidden=false;$('worldJoinFields').hidden=true;});
+$('worldJoin').addEventListener('click',function(){worldError('');$('worldJoinFields').hidden=false;$('worldCreateFields').hidden=true;});
+$('worldLeave').addEventListener('click',function(){disconnectWorld();toast('Você saiu do mundo neste aparelho.');});
+$('worldCopyCode').addEventListener('click',function(){if(worldId)copyText(worldId,'Código copiado.');});
+$('worldCopyLink').addEventListener('click',function(){if(worldId)copyText(worldLink(),'Link copiado.');});
+$('worldCreateConfirm').addEventListener('click',function(){
+  var name=$('worldName').value.trim();worldError('');
+  if(!name){worldError('Digite um nome para o mundo.');return;}
+  if(!dbh||!myId){worldError('Banco não conectado. Configure o Firebase.');return;}
+  var code=worldCode();
+  dbh.collection('worlds').doc(code).set({name:name,createdBy:myId,createdAt:firebase.firestore.FieldValue.serverTimestamp()})
+    .then(function(){return enterWorld(code);}).catch(function(e){worldError(errMsg(e));});
+});
+$('worldJoinConfirm').addEventListener('click',function(){enterWorld($('worldCodeInput').value);});
 function connect(){
-  var c=window.claude;
-  if(!c||typeof c.use!=='function'){ fallbackLocal(); return; }
-  Promise.all([c.use('db'),c.use('user')]).then(function(r){
-    dbh=r[0]; userNs=r[1];
-    return userNs?Promise.all([userNs.id(),userNs.can('data.write'),userNs.canEdit()]):[null,null,false];
-  }).then(function(r){
-    myId=r[0]; canWrite=r[1]; isAdmin=!!r[2];
-    if(!dbh||!myId){ dbh=null; fallbackLocal(); return; }
-    shareOK=true;
-    var timer=setTimeout(function(){ slowNet=true; renderStatus(); },10000);
-    dbh.collection('places').onSnapshot(function(snap){
-      var d={}; snap.docs.forEach(function(ds){ var v=ds.data(); d[ds.id]=(v&&v.items)||{}; });
-      sharedDocs=d; if(!snap.metadata.fromCache){ sharedReady=true; slowNet=false; clearTimeout(timer); } sharedErr=false;
-      rebuild(); renderAll(); autoCenter(false); resolveNames();
-    },function(e){ sharedErr=true; clearTimeout(timer); renderAll(); });
-    var first=true;
-    dbh.collection('data/users/'+myId).doc('places').onSnapshot(function(ds){
-      var v=ds.exists?ds.data():null; mineItems=(v&&v.items)||{}; mineReady=true;
-      rebuild(); renderAll(); autoCenter(false);
-      if(first&&!snap_exists(ds)&&!snap_fromCache(ds)){ first=false; migrateLocal(); } else if(!snap_fromCache(ds)) first=false;
-    },function(e){ renderAll(); });
-    renderAll();
-  }).catch(function(){ fallbackLocal(); });
+  fallbackLocal();worldPanel();
+  if(typeof firebase==='undefined'||FIREBASE_CONFIG.apiKey==='COLE_API_KEY'||FIREBASE_CONFIG.projectId==='COLE_PROJECT_ID'){
+    worldError('Configure o Firebase no início do arquivo index.html para ativar mundos compartilhados.');return;
+  }
+  try{
+    if(!firebase.apps.length)firebase.initializeApp(FIREBASE_CONFIG);
+    dbh=firebase.firestore();
+    firebase.auth().signInAnonymously().then(function(credential){
+      myId=credential.user.uid;worldError('');
+      var code=new URLSearchParams(location.search).get('mundo');
+      if(!code)try{code=localStorage.getItem('mc-world-id');}catch(e){}
+      if(code)enterWorld(code);
+    }).catch(function(e){worldError('Não foi possível conectar. Ative Authentication > Anônimo no Firebase. '+errMsg(e));});
+  }catch(e){worldError('Erro na configuração do Firebase: '+errMsg(e));}
 }
-function snap_exists(ds){ return ds.exists; }
-function snap_fromCache(ds){ return ds.metadata&&ds.metadata.fromCache; }
 function fallbackLocal(){
-  dbh=null; shareOK=false; scope='mine'; $('fscope').value='mine';
-  mineItems={}; loadLocal().forEach(function(o){ if(validItem(o)) mineItems[o.id||uid()]={name:o.name,x:o.x,y:o.y,z:o.z,dim:o.dim,icon:o.icon,note:o.note||''}; });
-  rebuild(); renderAll(); autoCenter(true);
+  scope='mine';$('fscope').value='mine';mineItems={};
+  loadLocal().forEach(function(o){if(validItem(o))mineItems[o.id||uid()]={name:o.name,x:o.x,y:o.y,z:o.z,dim:o.dim,icon:o.icon,note:o.note||''};});
+  rebuild();renderAll();autoCenter(true);
 }
 
 /* ---------- início ---------- */
